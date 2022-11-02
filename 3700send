@@ -1,5 +1,5 @@
 #!/usr/bin/env -S python3 -u
-
+from queue import Queue
 import argparse, socket, time, json, select, struct, sys, math
 
 DATA_SIZE = 1375
@@ -12,9 +12,12 @@ class Sender:
         self.socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         self.socket.bind(('0.0.0.0', 0))
         self.waiting = False
-        self.window = 2
+        self.adv_window = 2
+        # self.window = self.adv_window
         self.seq_num = 0
-        self.ack_seq_nums = []
+        self.received_ACKs = []
+        # list of sequence numbers
+        self.waiting_ACK_queue =[]
 
     def log(self, message):
         sys.stderr.write(message + "\n")
@@ -23,15 +26,38 @@ class Sender:
     def send(self, message):
         self.socket.sendto(json.dumps(message).encode('utf-8'), (self.host, self.remote_port))
 
+    # updates the sequence number for next outgoing packet
     def update_seq_num(self):
-        if (self.seq_num >= self.window): # times 2 if it doesnt work
+        if (self.seq_num >= self.adv_window - 1): # times 2 if it doesnt work
             self.seq_num = 0
         else:
             self.seq_num += 1
+    
+    # stores received ACK
+    def receive_ACK(self, seq_num):
+        self.received_ACKs.append(seq_num)
+    
+    # checks if a ACK is valid and moves the sliding window
+    def check_ACK(self, seq_num):
+        if len(self.waiting_ACK_queue) > 0:
+            first = self.waiting_ACK_queue[0]
+            if seq_num == first:
+                self.waiting_ACK_queue.pop(0)
+                if (seq_num + 1) in self.received_ACKs:
+                    self.check_ACK(seq_num + 1)
+
+    # clears the list of received ACKs if its length reaches the window size
+    def reset_received_ACKs(self):
+        if len(self.received_ACKs) == self.adv_window:
+            self.received_ACKs = []
         
+    # appends the sequence number for a sent packet to the list of waiting ACKs
+    def update_waiting_ACKs(self, seq_num):
+        self.waiting_ACK_queue.append(seq_num)
+         
     def run(self):
         while True:
-            sockets = [self.socket, sys.stdin] if not self.waiting else [self.socket]
+            sockets = [self.socket, sys.stdin] if (len(self.waiting_ACK_queue) < self.adv_window) else [self.socket]
 
             socks = select.select(sockets, [], [], 0.1)[0]
             for conn in socks:
@@ -42,14 +68,15 @@ class Sender:
                     self.log("Received message '%s'" % msg)
                     
                     msg_json = json.loads(msg)
-                    if (msg_json["seq_num"] not in self.ack_seq_nums):
-                        self.waiting = False
-                        self.ack_seq_nums.append(msg_json["seq_num"])
-                        if(len(self.ack_seq_nums) == self.window):
-                            self.ack_seq_nums = []
+                    seq_num = msg_json["seq_num"]
+                    # if ACK is not duplicate
+                    if (msg_json["seq_num"] not in self.received_ACKs):
+                        self.receive_ACK(seq_num)
+                        self.check_ACK(seq_num)
+                        self.reset_received_ACKs()
                 elif conn == sys.stdin:
                     count = 0
-                    while count < self.window:
+                    while count < self.adv_window - len(self.waiting_ACK_queue):
                         data = sys.stdin.read(DATA_SIZE)
                         if len(data) == 0:
                             self.log("All done!")
@@ -59,14 +86,13 @@ class Sender:
                                "type": "msg", 
                                "data": data, 
                                "seq_num": self.seq_num,
-                               "adv_window": self.window,
+                               "adv_window": self.adv_window,
                               }
                         self.log("Sending message '%s'" % msg)
                         self.send(msg)
                         count += 1
+                        self.update_waiting_ACKs(self.seq_num)
                         self.update_seq_num()
-                    self.waiting = True
-
         return
 
 if __name__ == "__main__":

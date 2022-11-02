@@ -12,6 +12,7 @@ class Receiver:
         self.remote_port = None
         self.received_seq_nums = []
         self.received_packets = {}
+        self.prev_packet = {}
 
     def send(self, message):
         self.socket.sendto(json.dumps(message).encode('utf-8'), (self.remote_host, self.remote_port))
@@ -19,7 +20,46 @@ class Receiver:
     def log(self, message):
         sys.stderr.write(message + "\n")
         sys.stderr.flush()
+    
+    # # Processes received packets. Prints and ACKs, or store it for later user depending on the sequence number
+    # def recv(self, packet):
+    #     msg_seq = packet["seq_num"]
         
+    #     # check if all packets with smaller sequence number have been received
+    #     # prev_seq_nums_received = True
+    #     # if msg_seq > 0:
+    #     #     for i in range(0, msg_seq):
+    #     #         if i not in self.received_seq_nums:
+    #     #             prev_seq_nums_received = False
+    #     #             break
+            
+    #     # if all packets with smaller sequence number have been received, print and ack this packet
+    #     # if prev_seq_nums_received:
+    #     #     self.log("prev_seq_nums_received")
+    #     #     self.print_ack(packet)
+    #         # look for received packets with larger sequence numbers that can be printed and ACKed after receiving this packet
+    #         # next_seq = msg_seq + 1
+    #         # while next_seq in self.received_seq_nums:
+    #         #     self.print_ack(self.received_packets[next_seq])
+    #         #     next_seq += 1
+
+    #     # add the sequence number of this packet to received sequence number list and store the packet
+    #     self.received_seq_nums.append(msg_seq)
+    #     self.received_packets[msg_seq] = packet
+        
+    #     # clear list of received sequence numbers if it is full
+    #     if(len(self.received_seq_nums) == packet["adv_window"]):
+    #         for i in range(0, packet["adv_window"]):
+    #             self.print_ack(self.received_packets[i])
+    #         self.received_seq_nums = []
+    #         self.reset_receiver_window()
+    
+    # stores received sequence number and packet
+    def recv(self, msg):
+        self.received_packets[msg["seq_num"]] = msg
+        self.received_seq_nums.append(msg["seq_num"])
+    
+    # print and sends ACK for a packet  
     def print_ack(self, msg):
         # Print out the data to stdout
         print(msg["data"], end='', flush=True)
@@ -30,17 +70,24 @@ class Receiver:
                 "seq_num": msg["seq_num"],
                 })
     
-    def reset_receiver_window(self):
-        self.received_seq_nums = []
-        self.received_packets = {}
-        
+    # clears the list of received sequence number and list of received packets if their length reach the advertised window
+    def reset_receiver_window(self, adv_window):
+        if(len(self.received_seq_nums) == adv_window):
+            self.log("reset")
+            self.received_seq_nums = []
+            self.received_packets = {}
+    
+    # updates the previousely received packet
+    def set_prev_packet(self, msg):
+        self.prev_packet = msg
+         
     def run(self):
         while True:
             socks = select.select([self.socket], [], [])[0]
             for conn in socks:
                 data, addr = conn.recvfrom(65535)
 
-                # Grab the remote host/port if we don't alreadt have it
+                # Grab the remote host/port if we don't already have it
                 if self.remote_host is None:
                     self.remote_host = addr[0]
                     self.remote_port = addr[1]
@@ -48,13 +95,11 @@ class Receiver:
                 msg = json.loads(data.decode('utf-8'))
                 self.log("Received data message %s" % msg)
                 
-                if (msg["seq_num"] not in self.received_seq_nums):
+                if (msg["seq_num"] not in self.received_seq_nums and msg != self.prev_packet):
+                    self.recv(msg)
                     self.print_ack(msg)
-                    
-                    self.received_seq_nums.append(msg["seq_num"])
-                    self.received_packets[msg["seq_num"]] = msg
-                    if(len(self.received_seq_nums) == msg["adv_window"]):
-                        self.reset_receiver_window()
+                    self.reset_receiver_window(msg["adv_window"])
+                    self.set_prev_packet(msg)
                 else:
                     self.log("Duplicate sequence number %s" % msg["seq_num"])
 
