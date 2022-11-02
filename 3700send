@@ -14,6 +14,7 @@ class Sender:
         self.waiting = False
         self.window = 2
         self.seq_num = 0
+        self.ack_seq_nums = []
 
     def log(self, message):
         sys.stderr.write(message + "\n")
@@ -39,7 +40,13 @@ class Sender:
                     msg = k.decode('utf-8')
 
                     self.log("Received message '%s'" % msg)
-                    self.waiting = False
+                    
+                    msg_json = json.loads(msg)
+                    if (msg_json["seq_num"] not in self.ack_seq_nums):
+                        self.waiting = False
+                        self.ack_seq_nums.append(msg_json["seq_num"])
+                        if(len(self.ack_seq_nums) == self.window):
+                            self.ack_seq_nums = []
                 elif conn == sys.stdin:
                     count = 0
                     while count < self.window:
@@ -69,3 +76,72 @@ if __name__ == "__main__":
     args = parser.parse_args()
     sender = Sender(args.host, args.port)
     sender.run()
+# import argparse, socket, time, json, select, struct, sys, math
+
+# DATA_SIZE = 1375
+
+# class Sender:
+#     def __init__(self, host, port):
+#         self.host = host
+#         self.remote_port = int(port)
+#         self.log("Sender starting up using port %s" % self.remote_port)
+#         self.socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+#         self.socket.bind(('0.0.0.0', 0))
+#         self.waiting = False
+#         self.window = 2
+#         self.seq_num = 0
+
+#     def log(self, message):
+#         sys.stderr.write(message + "\n")
+#         sys.stderr.flush()
+
+#     def send(self, message):
+#         self.socket.sendto(json.dumps(message).encode('utf-8'), (self.host, self.remote_port))
+
+#     def update_seq_num(self):
+#         if (self.seq_num >= self.window): # times 2 if it doesnt work
+#             self.seq_num = 0
+#         else:
+#             self.seq_num += 1
+        
+#     def run(self):
+#         while True:
+#             sockets = [self.socket, sys.stdin] if not self.waiting else [self.socket]
+
+#             socks = select.select(sockets, [], [], 0.1)[0]
+#             for conn in socks:
+#                 if conn == self.socket:
+#                     k, addr = conn.recvfrom(65535)
+#                     msg = k.decode('utf-8')
+
+#                     self.log("Received message '%s'" % msg)
+#                     self.waiting = False
+#                 elif conn == sys.stdin:
+#                     count = 0
+#                     while count < self.window:
+#                         data = sys.stdin.read(DATA_SIZE)
+#                         if len(data) == 0:
+#                             self.log("All done!")
+#                             sys.exit(0)
+
+#                         msg = { 
+#                                "type": "msg", 
+#                                "data": data, 
+#                                "seq_num": self.seq_num,
+#                                "adv_window": self.window,
+#                               }
+#                         self.log("Sending message '%s'" % msg)
+#                         self.send(msg)
+#                         count += 1
+#                         self.update_seq_num()
+#                     self.waiting = True
+
+#         return
+
+# if __name__ == "__main__":
+#     parser = argparse.ArgumentParser(description='send data')
+#     parser.add_argument('host', type=str, help="Remote host to connect to")
+#     parser.add_argument('port', type=int, help="UDP port number to connect to")
+#     args = parser.parse_args()
+#     sender = Sender(args.host, args.port)
+#     sender.run()
