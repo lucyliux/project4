@@ -12,6 +12,8 @@ class Receiver:
         self.remote_host = None
         self.remote_port = None
         self.prev_sec_num = -1
+        self.received_seq_nums = []
+        self.received_packets = []
 
     def send(self, message):
         self.socket.sendto(json.dumps(message).encode('utf-8'), (self.remote_host, self.remote_port))
@@ -19,6 +21,13 @@ class Receiver:
     def log(self, message):
         sys.stderr.write(message + "\n")
         sys.stderr.flush()
+        
+    def recv(self, msg):
+        # Print out the data to stdout
+        print(msg["data"], end='', flush=True)
+
+        # Always send back an ack
+        self.send({ "type": "ack" })
         
     def run(self):
         while True:
@@ -34,14 +43,18 @@ class Receiver:
                 msg = json.loads(data.decode('utf-8'))
                 self.log("Received data message %s" % msg)
                 
+                # if (msg["seq_num"] != self.prev_sec_num):
                 if (msg["seq_num"] != self.prev_sec_num):
-                    # Print out the data to stdout
-                    print(msg["data"], end='', flush=True)
+                    # # Print out the data to stdout
+                    # print(msg["data"], end='', flush=True)
 
-                    # Always send back an ack
-                    self.send({ "type": "ack" })
+                    # # Always send back an ack
+                    # self.send({ "type": "ack" })
+                    self.recv(msg)
                     
                     self.prev_sec_num = msg["seq_num"]
+                    self.received_seq_nums[len(self.received_seq_nums)] = msg["seq_num"]
+                    
                 else:
                     self.log("Duplicate sequence number %s" % msg["seq_num"])
 

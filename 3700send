@@ -23,7 +23,7 @@ class Sender:
         self.socket.sendto(json.dumps(message).encode('utf-8'), (self.host, self.remote_port))
 
     def update_seq_num(self):
-        if (self.seq_num >= self.window):
+        if (self.seq_num >= self.window): # times 2 if it doesnt work
             self.seq_num = 0
         else:
             self.seq_num += 1
@@ -48,7 +48,12 @@ class Sender:
                             self.log("All done!")
                             sys.exit(0)
 
-                        msg = { "type": "msg", "data": data, "seq_num": self.seq_num }
+                        msg = { 
+                               "type": "msg", 
+                               "data": data, 
+                               "seq_num": self.seq_num,
+                               "adv_window": self.window,
+                              }
                         self.log("Sending message '%s'" % msg)
                         self.send(msg)
                         count += 1
