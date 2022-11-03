@@ -1,5 +1,5 @@
 #!/usr/bin/env -S python3 -u
-from queue import Queue
+
 import argparse, socket, time, json, select, struct, sys, math
 
 DATA_SIZE = 1375
@@ -11,13 +11,10 @@ class Sender:
         self.log("Sender starting up using port %s" % self.remote_port)
         self.socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         self.socket.bind(('0.0.0.0', 0))
-        self.waiting = False
-        self.adv_window = 4
-        # self.window = self.adv_window
+        self.window = 4
         self.seq_num = 0
-        self.received_ACKs = []
-        # list of sequence numbers
-        self.waiting_ACK_queue =[]
+        self.prev_ACK = -1
+        self.waiting = 0
         self.done_sending = False
 
     def log(self, message):
@@ -27,41 +24,24 @@ class Sender:
     def send(self, message):
         self.socket.sendto(json.dumps(message).encode('utf-8'), (self.host, self.remote_port))
 
-    # updates the sequence number for next outgoing packet
+    def receive_ACK(self, seq_num):
+        if seq_num != self.prev_ACK:
+            self.prev_ACK = seq_num
+            self.waiting -= 1
+            
     def update_seq_num(self):
-        if (self.seq_num >= self.adv_window - 1): # times 2 if it doesnt work
+        if self.seq_num >= self.window - 1:
             self.seq_num = 0
         else:
             self.seq_num += 1
     
-    # stores received ACK
-    def receive_ACK(self, seq_num):
-        self.received_ACKs.append(seq_num)
-    
-    # checks if a ACK is valid and moves the sliding window
-    def check_ACK(self, seq_num):
-        if len(self.waiting_ACK_queue) > 0:
-            first = self.waiting_ACK_queue[0]
-            if seq_num == first:
-                self.waiting_ACK_queue.pop(0)
-                if (seq_num + 1) in self.received_ACKs:
-                    self.check_ACK(seq_num + 1)
-
-    # clears the list of received ACKs if its length reaches the window size
-    def reset_received_ACKs(self):
-        if len(self.received_ACKs) == self.adv_window:
-            self.received_ACKs = []
-        
-    # appends the sequence number for a sent packet to the list of waiting ACKs
-    def update_waiting_ACKs(self, seq_num):
-        self.waiting_ACK_queue.append(seq_num)
-         
     def run(self):
         while True:
-            if self.done_sending and len(self.waiting_ACK_queue) == 0:
+            if self.done_sending and self.waiting == 0:
                 self.log("All done!")
                 sys.exit(0)
-            sockets = [self.socket, sys.stdin] if (len(self.waiting_ACK_queue) < self.adv_window) else [self.socket]
+                
+            sockets = [self.socket, sys.stdin] if not self.done_sending and self.waiting == 0 else [self.socket]
 
             socks = select.select(sockets, [], [], 0.1)[0]
             for conn in socks:
@@ -72,33 +52,27 @@ class Sender:
                     self.log("Received message '%s'" % msg)
                     
                     msg_json = json.loads(msg)
-                    seq_num = msg_json["seq_num"]
-                    # if ACK is not duplicate
-                    if (msg_json["seq_num"] not in self.received_ACKs):
-                        self.receive_ACK(seq_num)
-                        self.check_ACK(seq_num)
-                        self.reset_received_ACKs()
+                    self.receive_ACK(msg_json["seq_num"])
                 elif conn == sys.stdin:
                     count = 0
-                    while count < self.adv_window - len(self.waiting_ACK_queue):
+                    while count < self.window:
                         data = sys.stdin.read(DATA_SIZE)
                         if len(data) == 0:
                             self.done_sending = True
-                            break
-                            # self.log("All done!")
-                            # sys.exit(0)
-
+                        
                         msg = { 
                                "type": "msg", 
-                               "data": data, 
+                               "data": data,
+                               "adv_window": self.window,
                                "seq_num": self.seq_num,
-                               "adv_window": self.adv_window,
-                              }
-                        self.log("Sending message '%s'" % msg)
+                               }
+                        self.log("Sending message '%s'" % msg["data"][0:20] + "seq: " + str(self.seq_num))
                         self.send(msg)
                         count += 1
-                        self.update_waiting_ACKs(self.seq_num)
                         self.update_seq_num()
+                        self.waiting += 1
+                    
+
         return
 
 if __name__ == "__main__":
@@ -108,72 +82,3 @@ if __name__ == "__main__":
     args = parser.parse_args()
     sender = Sender(args.host, args.port)
     sender.run()
-# import argparse, socket, time, json, select, struct, sys, math
-
-# DATA_SIZE = 1375
-
-# class Sender:
-#     def __init__(self, host, port):
-#         self.host = host
-#         self.remote_port = int(port)
-#         self.log("Sender starting up using port %s" % self.remote_port)
-#         self.socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-#         self.socket.bind(('0.0.0.0', 0))
-#         self.waiting = False
-#         self.window = 2
-#         self.seq_num = 0
-
-#     def log(self, message):
-#         sys.stderr.write(message + "\n")
-#         sys.stderr.flush()
-
-#     def send(self, message):
-#         self.socket.sendto(json.dumps(message).encode('utf-8'), (self.host, self.remote_port))
-
-#     def update_seq_num(self):
-#         if (self.seq_num >= self.window): # times 2 if it doesnt work
-#             self.seq_num = 0
-#         else:
-#             self.seq_num += 1
-        
-#     def run(self):
-#         while True:
-#             sockets = [self.socket, sys.stdin] if not self.waiting else [self.socket]
-
-#             socks = select.select(sockets, [], [], 0.1)[0]
-#             for conn in socks:
-#                 if conn == self.socket:
-#                     k, addr = conn.recvfrom(65535)
-#                     msg = k.decode('utf-8')
-
-#                     self.log("Received message '%s'" % msg)
-#                     self.waiting = False
-#                 elif conn == sys.stdin:
-#                     count = 0
-#                     while count < self.window:
-#                         data = sys.stdin.read(DATA_SIZE)
-#                         if len(data) == 0:
-#                             self.log("All done!")
-#                             sys.exit(0)
-
-#                         msg = { 
-#                                "type": "msg", 
-#                                "data": data, 
-#                                "seq_num": self.seq_num,
-#                                "adv_window": self.window,
-#                               }
-#                         self.log("Sending message '%s'" % msg)
-#                         self.send(msg)
-#                         count += 1
-#                         self.update_seq_num()
-#                     self.waiting = True
-
-#         return
-
-# if __name__ == "__main__":
-#     parser = argparse.ArgumentParser(description='send data')
-#     parser.add_argument('host', type=str, help="Remote host to connect to")
-#     parser.add_argument('port', type=int, help="UDP port number to connect to")
-#     args = parser.parse_args()
-#     sender = Sender(args.host, args.port)
-#     sender.run()
