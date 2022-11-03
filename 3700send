@@ -11,11 +11,16 @@ class Sender:
         self.log("Sender starting up using port %s" % self.remote_port)
         self.socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         self.socket.bind(('0.0.0.0', 0))
-        self.window = 4
+        self.adv_wnd = 2
+        self.ssthresh = self.adv_wnd
+        self.cwnd = 1
         self.seq_num = 0
-        self.prev_ACK = -1
-        self.waiting = 0
+        self.sent_packets = {}
+        self.num_dup_acks = 0
+        # self.received_acks = []
+        self.rtt = 1
         self.done_sending = False
+        self.rto = 1
 
     def log(self, message):
         sys.stderr.write(message + "\n")
@@ -23,25 +28,48 @@ class Sender:
 
     def send(self, message):
         self.socket.sendto(json.dumps(message).encode('utf-8'), (self.host, self.remote_port))
-
-    def receive_ACK(self, seq_num):
-        if seq_num != self.prev_ACK:
-            self.prev_ACK = seq_num
-            self.waiting -= 1
-            
+        self.sent_packets[message["seq_num"]] = message
+    
     def update_seq_num(self):
-        if self.seq_num >= self.window - 1:
+        # if self.seq_num >= self.adv_wnd - 1:
+        #     self.seq_num = 0
+        if self.seq_num >= 2**32 - 1:
             self.seq_num = 0
         else:
             self.seq_num += 1
+            
+    def recv_ack(self, seq_num):
+        if seq_num in self.sent_packets.keys():
+            self.num_dup_acks = 0
+            self.sent_packets.pop(seq_num)
+            self.update_cwnd()
+            # self.calculate_rtt
+        else:
+            self.num_dup_acks += 1
+            self.log("Dup ACKs: %s" %self.num_dup_acks)
+            if self.num_dup_acks >= 3:
+                self.fast_retransmit()
+                
+    def update_cwnd(self):
+        # slow start
+        if self.cwnd < self.ssthresh:
+            self.cwnd += 1
+        # # congestion avoidance
+        # else:
+        #     self.cwnd += 1 / self.cwnd
     
+    def fast_retransmit(self):
+        self.cwnd = self.ssthresh / 2
+        
     def run(self):
         while True:
-            if self.done_sending and self.waiting == 0:
+            self.log("Waiting:")
+            for p in self.sent_packets.keys():
+                self.log(str(p))
+            if self.done_sending and len(self.sent_packets) == 0:
                 self.log("All done!")
                 sys.exit(0)
-                
-            sockets = [self.socket, sys.stdin] if not self.done_sending and self.waiting == 0 else [self.socket]
+            sockets = [self.socket, sys.stdin] if len(self.sent_packets) == 0 and not self.done_sending else [self.socket]
 
             socks = select.select(sockets, [], [], 0.1)[0]
             for conn in socks:
@@ -49,28 +77,28 @@ class Sender:
                     k, addr = conn.recvfrom(65535)
                     msg = k.decode('utf-8')
 
-                    self.log("Received message '%s'" % msg)
-                    
                     msg_json = json.loads(msg)
-                    self.receive_ACK(msg_json["seq_num"])
+                    self.log("Received message '%s'" % msg)
+                    self.recv_ack(msg_json["seq_num"])
                 elif conn == sys.stdin:
                     count = 0
-                    while count < self.window:
+                    while count < self.cwnd and not self.done_sending:
                         data = sys.stdin.read(DATA_SIZE)
                         if len(data) == 0:
                             self.done_sending = True
-                        
+                            break
+
                         msg = { 
-                               "type": "msg", 
-                               "data": data,
-                               "adv_window": self.window,
-                               "seq_num": self.seq_num,
-                               }
-                        self.log("Sending message '%s'" % msg["data"][0:20] + "seq: " + str(self.seq_num))
+                            "type": "msg", 
+                            "data": data,
+                            "seq_num": self.seq_num,
+                            "cwnd": self.cwnd,
+                            }
+                        self.log("Sending message '%s'" % msg["data"][0:20] + " seq: " + str(msg["seq_num"]))
                         self.send(msg)
-                        count += 1
                         self.update_seq_num()
-                        self.waiting += 1
+                        count += 1
+
                     
 
         return
