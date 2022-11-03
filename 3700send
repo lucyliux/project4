@@ -12,12 +12,13 @@ class Sender:
         self.socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         self.socket.bind(('0.0.0.0', 0))
         self.waiting = False
-        self.adv_window = 2
+        self.adv_window = 4
         # self.window = self.adv_window
         self.seq_num = 0
         self.received_ACKs = []
         # list of sequence numbers
         self.waiting_ACK_queue =[]
+        self.done_sending = False
 
     def log(self, message):
         sys.stderr.write(message + "\n")
@@ -57,6 +58,9 @@ class Sender:
          
     def run(self):
         while True:
+            if self.done_sending and len(self.waiting_ACK_queue) == 0:
+                self.log("All done!")
+                sys.exit(0)
             sockets = [self.socket, sys.stdin] if (len(self.waiting_ACK_queue) < self.adv_window) else [self.socket]
 
             socks = select.select(sockets, [], [], 0.1)[0]
@@ -79,8 +83,10 @@ class Sender:
                     while count < self.adv_window - len(self.waiting_ACK_queue):
                         data = sys.stdin.read(DATA_SIZE)
                         if len(data) == 0:
-                            self.log("All done!")
-                            sys.exit(0)
+                            self.done_sending = True
+                            break
+                            # self.log("All done!")
+                            # sys.exit(0)
 
                         msg = { 
                                "type": "msg", 
