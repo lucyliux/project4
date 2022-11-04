@@ -1,5 +1,5 @@
 #!/usr/bin/env -S python3 -u
-
+import hashlib
 import argparse, socket, time, json, select, struct, sys, math
 
 class Receiver:
@@ -14,11 +14,14 @@ class Receiver:
         
         self.sender_cwnd = -1
         self.out_of_order_packets = {}
-        self.acked_seq_nums = []
+        # self.acked_seq_nums = []
         self.prev_packet = {}
         self.expecting_seq_num = 0
         self.prev_ack = -1
         self.num_sent_dups = 0
+        self.wrong_hash_needs_retransmit = False
+        self.buffer = []
+        self.EOF_index = -1
 
     def send(self, message):
         self.socket.sendto(json.dumps(message).encode('utf-8'), (self.remote_host, self.remote_port))
@@ -27,6 +30,19 @@ class Receiver:
         sys.stderr.write(message + "\n")
         sys.stderr.flush()
 
+    def flush_buffer(self):
+        # if len(self.buffer) == self.sender_cwnd or self.buffer[len(self.buffer) - 1]["type"] == "EOF":
+        # self.log("Buffer length: %s" %len(self.buffer))
+        # self.log("EOF index: %s" %(self.EOF_index + 1))
+        if len(self.buffer) == self.EOF_index + 1:
+            self.log("Flushing buffer")
+            for message in self.buffer:
+                self.print_ack(message)
+            self.buffer = []
+            self.out_of_order_packets = {}
+            self.num_sent_dups = 0
+            self.log("Buffer length: %s" %len(self.buffer))
+            
     def print_ack(self, msg):
         # Print out the data to stdout
         print(msg["data"], end='', flush=True)
@@ -39,77 +55,129 @@ class Receiver:
         self.send({ 
                    "type": "ack",
                    "seq_num": seq_num,
+                   "hash": hashlib.md5(str(seq_num).encode('utf-8')).hexdigest(),
                    })
-        self.log("ACKed %s" % msg["data"][0:20] + " seq: " + str(seq_num))
-        self.acked_seq_nums.append(seq_num)
-        self.expecting_seq_num = (seq_num + 1) % self.sender_cwnd
-        self.log("Now expecting: %s" %self.expecting_seq_num)
-        self.prev_ack = seq_num
-        self.log("ACKed:")
-        for i in self.acked_seq_nums:
-            self.log(str(i))             
+        # self.log("ACKed %s" % msg["data"][0:20] + " seq: " + str(seq_num))
+        # self.acked_seq_nums.append(seq_num)
+        # self.expecting_seq_num = (seq_num + 1) % self.sender_cwnd
+        # self.log("Now expecting: %s" %self.expecting_seq_num)
+        # self.prev_ack = seq_num
+        # self.log("ACKed:")
+        # for i in self.acked_seq_nums:
+            # self.log(str(i))             
     
+    def add_to_buffer(self, msg):
+        self.buffer.append(msg)
+        self.log("Buffered packet %s" %msg["seq_num"])
+        self.expecting_seq_num = (msg["seq_num"] + 1) % self.sender_cwnd
+        self.prev_ack = msg["seq_num"]
+        # self.log("Curr prev ack: %s" %self.prev_ack)
+        
+        # self.log("Now expecting: %s" %self.expecting_seq_num)
+        
     def send_dup_ack(self):
+        # msg = { 
+        #            "type": "ack",
+        #            "seq_num": self.prev_ack,
+        # }
         self.send({ 
                    "type": "ack",
                    "seq_num": self.prev_ack,
+                   "hash": hashlib.md5(str(self.prev_ack).encode('utf-8')).hexdigest(),
                    })
         self.log("Sending duplicate ACK: %s" %str(self.prev_ack))
         self.num_sent_dups += 1
         if self.num_sent_dups >= 2:
             self.out_of_order_packets = {}
+            self.wrong_hash_needs_retransmit = False
+            self.num_sent_dups = 0
+            # self.buffer = []
         
     def isDuplicate(self, msg):
-        return msg["seq_num"] in self.acked_seq_nums or msg["seq_num"] in self.out_of_order_packets.keys() or msg == self.prev_packet
+        # return msg["seq_num"] in self.acked_seq_nums or 
+        return msg["seq_num"] in self.out_of_order_packets.keys() or msg == self.prev_packet
     
     def recv(self, msg):
         msg_seq = msg["seq_num"]   
         # if it is not a duplicate packet
         if not self.isDuplicate(msg):
+        # and self.validate_hash(msg):
             # if it is in order
             if msg_seq == self.expecting_seq_num:
-                self.print_ack(msg)
+                # self.print_ack(msg)
+                self.add_to_buffer(msg)
+                # self.log("Buffer length: %s" %len(self.buffer))
                 # self.acked_seq_nums.append(msg_seq)
                 self.check_out_of_order_packets(msg_seq)
             # if it is out of order
             else:
                 self.out_of_order_packets[msg_seq] = msg
+        else:
+            self.log("Received duplicate %s" %msg_seq)
+            self.ack(msg)
     
-    def reset_acked(self):
-        if len(self.acked_seq_nums) >= self.sender_cwnd:
-            self.acked_seq_nums = []
-            self.out_of_order_packets = {}
-            self.num_sent_dups = 0
-            # self.prev_ack = -1
+    # def reset_acked(self):
+    #     if len(self.acked_seq_nums) >= self.sender_cwnd:
+    #         self.acked_seq_nums = []
+    #         self.out_of_order_packets = {}
+    #         self.num_sent_dups = 0
+    #         # self.prev_ack = -1
             
     def check_out_of_order_packets(self, seq_num):
         if seq_num + 1 in self.out_of_order_packets.keys():
             msg = self.out_of_order_packets[seq_num + 1]
-            self.print_ack(msg)
+            # self.print_ack(msg)
+            self.add_to_buffer(msg)
+            # self.log("Buffer length: %s" %len(self.buffer))
             self.check_out_of_order_packets(seq_num + 1)
-             
+    
+    def validate_hash(self, msg):
+        result = hashlib.md5(msg["data"].encode('utf-8')).hexdigest() == msg["hash"]
+        # self.log("Data hash")
+        # self.log(hashlib.md5(msg["data"].encode('utf-8')))
+        if result:
+            self.log("Hashing matched")
+        else:
+            self.wrong_hash_needs_retransmit = True
+            self.log("Hashing do not match")
+        return result
+    
     def run(self):
         while True:
             received_data = False
+            corrupted = False
             socks = select.select([self.socket], [], [], 1)[0]
             for conn in socks:
                 data, addr = conn.recvfrom(65535)
-                received_data = True
+                if self.wrong_hash_needs_retransmit:
+                    corrupted = True
+                    break
+                
                 # Grab the remote host/port if we don't alreadt have it
                 if self.remote_host is None:
                     self.remote_host = addr[0]
                     self.remote_port = addr[1]
 
                 msg = json.loads(data.decode('utf-8'))
-                self.log("Received data message %s" % msg["data"][0:20] + " seq: " + str(msg["seq_num"]))
-                # self.print_ack(msg)
-                if self.sender_cwnd == -1:
-                    self.sender_cwnd = msg["cwnd"]
-                self.recv(msg)
-                self.reset_acked()
-                self.prev_packet = msg
+                # received_data = True
+                if msg["type"] == "EOF":
+                    self.EOF_index = msg["seq_num"]
+                    self.log("End of file received")
+                    self.flush_buffer()
+                else:
+                    received_data = True
+                    self.log("Received data message %s" % msg["data"][0:20] + " seq: " + str(msg["seq_num"]))
+                    if self.sender_cwnd == -1:
+                        self.sender_cwnd = msg["cwnd"]
+                        self.EOF_index = self.sender_cwnd - 1
+                    self.recv(msg)
+                    # self.reset_acked()
+                    self.prev_packet = msg
+                    self.flush_buffer()
             if not received_data:
                 self.send_dup_ack()
+                if corrupted:
+                    self.send_dup_ack()
                 # self.send_dup_ack()
         return
 
