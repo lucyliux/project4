@@ -1,0 +1,101 @@
+#!/usr/bin/env -S python3 -u
+
+import argparse, socket, time, json, select, struct, sys, math
+
+DATA_SIZE = 1375
+
+class Sender:
+    def __init__(self, host, port):
+        self.host = host
+        self.remote_port = int(port)
+        self.log("Sender starting up using port %s" % self.remote_port)
+        self.socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        self.socket.bind(('0.0.0.0', 0))
+        self.window = 4
+        self.seq_num = 0
+        self.prev_ACK = -1
+        self.waiting = 0
+        self.done_sending = False
+        self.num_duplicate_ACKs = 0
+        self.sent_packets = {}
+
+    def log(self, message):
+        sys.stderr.write(message + "\n")
+        sys.stderr.flush()
+
+    def send(self, message, isRetransmission = False):
+        self.socket.sendto(json.dumps(message).encode('utf-8'), (self.host, self.remote_port))
+        if not isRetransmission:
+            self.sent_packets[message["seq_num"]] = message
+
+    def receive_ACK(self, seq_num):
+        if seq_num != self.prev_ACK:
+            self.prev_ACK = seq_num
+            self.waiting -= 1
+            self.sent_packets.pop(seq_num)
+        else:
+            self.num_duplicate_ACKs += 1
+            if self.num_duplicate_ACKs >= 3:
+                # self.log("3 Duplicate ACKs")
+                self.retransmit(seq_num)
+    
+    # retransmit all packets in current window with sequence number greater then input sequence number
+    def retransmit(self, seq_num):
+        start = (seq_num + 1) % self.window
+        for i in range(start, self.window):
+            self.log("Retransmitting packet %s" %i + " at " + str(time.time()))
+            # self.send(self.sent_packets[seq_num], True)
+            
+    def update_seq_num(self):
+        if self.seq_num >= self.window - 1:
+            self.seq_num = 0
+        else:
+            self.seq_num += 1
+    
+    def run(self):
+        while True:
+            if self.done_sending and self.waiting == 0:
+                self.log("All done!")
+                sys.exit(0)
+                
+            sockets = [self.socket, sys.stdin] if not self.done_sending and self.waiting == 0 else [self.socket]
+
+            socks = select.select(sockets, [], [], 0.1)[0]
+            for conn in socks:
+                if conn == self.socket:
+                    k, addr = conn.recvfrom(65535)
+                    msg = k.decode('utf-8')
+
+                    self.log("Received message '%s'" % msg)
+                    
+                    msg_json = json.loads(msg)
+                    self.receive_ACK(msg_json["seq_num"])
+                elif conn == sys.stdin:
+                    count = 0
+                    while count < self.window:
+                        data = sys.stdin.read(DATA_SIZE)
+                        if len(data) == 0:
+                            self.done_sending = True
+                        
+                        msg = { 
+                               "type": "msg", 
+                               "data": data,
+                               "adv_window": self.window,
+                               "seq_num": self.seq_num,
+                               }
+                        self.log("Sending message '%s'" % msg["data"][0:20] + "seq: " + str(self.seq_num))
+                        self.send(msg)
+                        count += 1
+                        self.update_seq_num()
+                        self.waiting += 1
+                    
+
+        return
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description='send data')
+    parser.add_argument('host', type=str, help="Remote host to connect to")
+    parser.add_argument('port', type=int, help="UDP port number to connect to")
+    args = parser.parse_args()
+    sender = Sender(args.host, args.port)
+    sender.run()
