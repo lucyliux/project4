@@ -1,5 +1,5 @@
 #!/usr/bin/env -S python3 -u
-
+import hashlib
 import argparse, socket, time, json, select, struct, sys, math
 
 class Receiver:
@@ -12,13 +12,8 @@ class Receiver:
         self.remote_host = None
         self.remote_port = None
         
-        self.sender_cwnd = -1
         self.out_of_order_packets = {}
-        self.acked_seq_nums = []
-        self.prev_packet = {}
-        self.expecting_seq_num = 0
-        self.prev_ack = -1
-        self.num_sent_dups = 0
+        self.prev_print_ack = -1
 
     def send(self, message):
         self.socket.sendto(json.dumps(message).encode('utf-8'), (self.remote_host, self.remote_port))
@@ -26,91 +21,75 @@ class Receiver:
     def log(self, message):
         sys.stderr.write(message + "\n")
         sys.stderr.flush()
-
-    def print_ack(self, msg):
-        # Print out the data to stdout
+        
+    # Print out the data to stdout
+    def print(self, msg):
         print(msg["data"], end='', flush=True)
+        self.log("Printing %s" %msg["data"][0:20])
+        self.prev_print_ack = msg["seq_num"]
 
-        # Always send back an ack
-        self.ack(msg)
-    
     def ack(self, msg):
         seq_num = msg["seq_num"]
         self.send({ 
                    "type": "ack",
                    "seq_num": seq_num,
                    })
-        self.log("ACKed %s" % msg["data"][0:20] + " seq: " + str(seq_num))
-        self.acked_seq_nums.append(seq_num)
-        self.expecting_seq_num = (seq_num + 1) % self.sender_cwnd
-        self.log("Now expecting: %s" %self.expecting_seq_num)
-        self.prev_ack = seq_num
-        self.log("ACKed:")
-        for i in self.acked_seq_nums:
-            self.log(str(i))             
-    
-    def send_dup_ack(self):
-        self.send({ 
-                   "type": "ack",
-                   "seq_num": self.prev_ack,
-                   })
-        self.log("Sending duplicate ACK: %s" %str(self.prev_ack))
-        self.num_sent_dups += 1
-        if self.num_sent_dups >= 2:
-            self.out_of_order_packets = {}
-        
-    def isDuplicate(self, msg):
-        return msg["seq_num"] in self.acked_seq_nums or msg["seq_num"] in self.out_of_order_packets.keys() or msg == self.prev_packet
+        self.log("Acknowledging packet %s" %seq_num)
     
     def recv(self, msg):
-        msg_seq = msg["seq_num"]   
-        # if it is not a duplicate packet
-        if not self.isDuplicate(msg):
-            # if it is in order
-            if msg_seq == self.expecting_seq_num:
-                self.print_ack(msg)
-                # self.acked_seq_nums.append(msg_seq)
-                self.check_out_of_order_packets(msg_seq)
-            # if it is out of order
-            else:
-                self.out_of_order_packets[msg_seq] = msg
+        if self.validate_hash(msg):
+            msg_seq = msg["seq_num"] 
+            # if it is not a duplicate packet
+            if not self.isDuplicate(msg_seq):
+                # if it is in order
+                self.log("Msg seq: %s" %msg_seq)
+                self.log('Expecting: %s' %(self.prev_print_ack + 1))
+                if msg_seq == self.prev_print_ack + 1:
+                    self.print(msg)
+                    self.check_out_of_order_packets()
+                    self.ack(msg)
+                    return
+                # if it is out of order
+                else:
+                    self.out_of_order_packets[msg_seq] = msg
+            self.ack(msg)
     
-    def reset_acked(self):
-        if len(self.acked_seq_nums) >= self.sender_cwnd:
-            self.acked_seq_nums = []
-            self.out_of_order_packets = {}
-            self.num_sent_dups = 0
-            # self.prev_ack = -1
-            
-    def check_out_of_order_packets(self, seq_num):
-        if seq_num + 1 in self.out_of_order_packets.keys():
-            msg = self.out_of_order_packets[seq_num + 1]
-            self.print_ack(msg)
-            self.check_out_of_order_packets(seq_num + 1)
-             
+    def check_out_of_order_packets(self):
+        seq_num = self.prev_print_ack + 1
+        self.log("Checking %s" %seq_num)
+        if seq_num in self.out_of_order_packets.keys():
+            msg = self.out_of_order_packets[seq_num]
+            self.log("Now able to ack %s" %seq_num)
+            self.print(msg)
+            self.check_out_of_order_packets()
+
+    def isDuplicate(self, seq_num):
+        result = seq_num <= self.prev_print_ack
+        if result:
+            self.log("Duplicate %s" %seq_num + " with last acked " + str(self.prev_print_ack))
+        return result
+    
+    def validate_hash(self, msg):
+        result = hashlib.md5(msg["data"].encode('utf-8')).hexdigest() == msg["hash"]
+        return result
+    
     def run(self):
         while True:
-            received_data = False
-            socks = select.select([self.socket], [], [], 1)[0]
+            socks = select.select([self.socket], [], [])[0]
             for conn in socks:
                 data, addr = conn.recvfrom(65535)
-                received_data = True
+
                 # Grab the remote host/port if we don't alreadt have it
                 if self.remote_host is None:
                     self.remote_host = addr[0]
                     self.remote_port = addr[1]
 
-                msg = json.loads(data.decode('utf-8'))
-                self.log("Received data message %s" % msg["data"][0:20] + " seq: " + str(msg["seq_num"]))
-                # self.print_ack(msg)
-                if self.sender_cwnd == -1:
-                    self.sender_cwnd = msg["cwnd"]
-                self.recv(msg)
-                self.reset_acked()
-                self.prev_packet = msg
-            if not received_data:
-                self.send_dup_ack()
-                # self.send_dup_ack()
+                try:
+                    msg = json.loads(data.decode('utf-8'))
+                    self.log("Received data message %s" % msg["data"][0:20])
+                    self.recv(msg)
+                except:
+                    self.log("Could not load json")
         return
 
 if __name__ == "__main__":

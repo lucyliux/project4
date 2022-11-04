@@ -15,7 +15,7 @@ class Sender:
         self.seq_num = 0
         self.prev_ACK = -1
         self.waiting = 0
-        self.done_sending = False
+        self.done_loading = False
         self.num_duplicate_ACKs = 0
         self.sent_packets = {}
 
@@ -54,11 +54,11 @@ class Sender:
     
     def run(self):
         while True:
-            if self.done_sending and self.waiting == 0:
+            if self.done_loading and self.waiting == 0:
                 self.log("All done!")
                 sys.exit(0)
                 
-            sockets = [self.socket, sys.stdin] if not self.done_sending and self.waiting == 0 else [self.socket]
+            sockets = [self.socket, sys.stdin] if not self.done_loading and self.waiting == 0 else [self.socket]
 
             socks = select.select(sockets, [], [], 0.1)[0]
             for conn in socks:
@@ -75,7 +75,7 @@ class Sender:
                     while count < self.window:
                         data = sys.stdin.read(DATA_SIZE)
                         if len(data) == 0:
-                            self.done_sending = True
+                            self.done_loading = True
                         
                         msg = { 
                                "type": "msg", 
