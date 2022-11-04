@@ -16,6 +16,9 @@ class Receiver:
         self.out_of_order_packets = {}
         self.acked_seq_nums = []
         self.prev_packet = {}
+        self.expecting_seq_num = 0
+        self.prev_ack = -1
+        self.num_sent_dups = 0
 
     def send(self, message):
         self.socket.sendto(json.dumps(message).encode('utf-8'), (self.remote_host, self.remote_port))
@@ -32,31 +35,52 @@ class Receiver:
         self.ack(msg)
     
     def ack(self, msg):
+        seq_num = msg["seq_num"]
         self.send({ 
                    "type": "ack",
-                   "seq_num": msg["seq_num"],
+                   "seq_num": seq_num,
                    })
-        self.log("ACKed %s" % msg["data"][0:20] + " seq: " + str(msg["seq_num"]))
+        self.log("ACKed %s" % msg["data"][0:20] + " seq: " + str(seq_num))
+        self.acked_seq_nums.append(seq_num)
+        self.expecting_seq_num = (seq_num + 1) % self.sender_cwnd
+        self.log("Now expecting: %s" %self.expecting_seq_num)
+        self.prev_ack = seq_num
+        self.log("ACKed:")
+        for i in self.acked_seq_nums:
+            self.log(str(i))             
+    
+    def send_dup_ack(self):
+        self.send({ 
+                   "type": "ack",
+                   "seq_num": self.prev_ack,
+                   })
+        self.log("Sending duplicate ACK: %s" %str(self.prev_ack))
+        self.num_sent_dups += 1
+        if self.num_sent_dups >= 2:
+            self.out_of_order_packets = {}
         
     def isDuplicate(self, msg):
         return msg["seq_num"] in self.acked_seq_nums or msg["seq_num"] in self.out_of_order_packets.keys() or msg == self.prev_packet
     
     def recv(self, msg):
-        msg_seq = msg["seq_num"]    
+        msg_seq = msg["seq_num"]   
         # if it is not a duplicate packet
         if not self.isDuplicate(msg):
             # if it is in order
-            if len(self.acked_seq_nums) == 0 or msg_seq == self.acked_seq_nums[len(self.acked_seq_nums) - 1]:
+            if msg_seq == self.expecting_seq_num:
                 self.print_ack(msg)
-                self.acked_seq_nums.append(msg_seq)
+                # self.acked_seq_nums.append(msg_seq)
                 self.check_out_of_order_packets(msg_seq)
             # if it is out of order
             else:
                 self.out_of_order_packets[msg_seq] = msg
     
     def reset_acked(self):
-        if len(self.acked_seq_nums) >= self.sender_cwnd and len(self.out_of_order_packets) == 0:
+        if len(self.acked_seq_nums) >= self.sender_cwnd:
             self.acked_seq_nums = []
+            self.out_of_order_packets = {}
+            self.num_sent_dups = 0
+            # self.prev_ack = -1
             
     def check_out_of_order_packets(self, seq_num):
         if seq_num + 1 in self.out_of_order_packets.keys():
@@ -66,10 +90,11 @@ class Receiver:
              
     def run(self):
         while True:
-            socks = select.select([self.socket], [], [])[0]
+            received_data = False
+            socks = select.select([self.socket], [], [], 1)[0]
             for conn in socks:
                 data, addr = conn.recvfrom(65535)
-
+                received_data = True
                 # Grab the remote host/port if we don't alreadt have it
                 if self.remote_host is None:
                     self.remote_host = addr[0]
@@ -83,7 +108,9 @@ class Receiver:
                 self.recv(msg)
                 self.reset_acked()
                 self.prev_packet = msg
-
+            if not received_data:
+                self.send_dup_ack()
+                # self.send_dup_ack()
         return
 
 if __name__ == "__main__":

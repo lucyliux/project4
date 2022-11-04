@@ -11,11 +11,12 @@ class Sender:
         self.log("Sender starting up using port %s" % self.remote_port)
         self.socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         self.socket.bind(('0.0.0.0', 0))
-        self.adv_wnd = 2
+        self.adv_wnd = 4
         self.ssthresh = self.adv_wnd
-        self.cwnd = 1
+        self.cwnd = self.adv_wnd
         self.seq_num = 0
         self.sent_packets = {}
+        self.waiting_acks = []
         self.num_dup_acks = 0
         # self.received_acks = []
         self.rtt = 1
@@ -26,50 +27,62 @@ class Sender:
         sys.stderr.write(message + "\n")
         sys.stderr.flush()
 
-    def send(self, message):
+    def send(self, message, isRetransmit = False):
         self.socket.sendto(json.dumps(message).encode('utf-8'), (self.host, self.remote_port))
         self.sent_packets[message["seq_num"]] = message
+        if not isRetransmit:
+            self.waiting_acks.append(message["seq_num"])
     
     def update_seq_num(self):
-        # if self.seq_num >= self.adv_wnd - 1:
-        #     self.seq_num = 0
-        if self.seq_num >= 2**32 - 1:
+        if self.seq_num >= self.adv_wnd - 1:
             self.seq_num = 0
+        # if self.seq_num >= 2**32 - 1:
+        #     self.seq_num = 0
         else:
             self.seq_num += 1
             
     def recv_ack(self, seq_num):
-        if seq_num in self.sent_packets.keys():
+        # if seq_num in self.sent_packets.keys():
+        if seq_num in self.waiting_acks:
             self.num_dup_acks = 0
-            self.sent_packets.pop(seq_num)
-            self.update_cwnd()
+            # self.sent_packets.pop(seq_num)
+            self.waiting_acks.remove(seq_num)
+            # self.update_cwnd()
             # self.calculate_rtt
         else:
             self.num_dup_acks += 1
             self.log("Dup ACKs: %s" %self.num_dup_acks)
             if self.num_dup_acks >= 3:
-                self.fast_retransmit()
+                self.retransmit(seq_num)
                 
-    def update_cwnd(self):
-        # slow start
-        if self.cwnd < self.ssthresh:
-            self.cwnd += 1
-        # # congestion avoidance
-        # else:
-        #     self.cwnd += 1 / self.cwnd
+    # def update_cwnd(self):
+    #     # slow start
+    #     if self.cwnd < self.ssthresh:
+    #         self.cwnd += 1
+    #     # # congestion avoidance
+    #     # else:
+    #     #     self.cwnd += 1 / self.cwnd
+    def retransmit(self, seq_num):
+        for i in range ((seq_num + 1) % self.cwnd, len(self.sent_packets)):
+            # self.log("Retransmitting packet %s" %i + " at " + str(time.time()))
+            self.log("Retransmitting packet %s" %i)
+            self.send(self.sent_packets[i], True)
+            
     
-    def fast_retransmit(self):
-        self.cwnd = self.ssthresh / 2
+    # def fast_retransmit(self):
+    #     self.cwnd = self.ssthresh / 2
         
     def run(self):
         while True:
             self.log("Waiting:")
-            for p in self.sent_packets.keys():
+            # for p in self.sent_packets.keys():
+            #     self.log(str(p))
+            for p in self.waiting_acks:
                 self.log(str(p))
-            if self.done_sending and len(self.sent_packets) == 0:
+            if self.done_sending and len(self.waiting_acks) == 0:
                 self.log("All done!")
                 sys.exit(0)
-            sockets = [self.socket, sys.stdin] if len(self.sent_packets) == 0 and not self.done_sending else [self.socket]
+            sockets = [self.socket, sys.stdin] if len(self.waiting_acks) == 0 and not self.done_sending else [self.socket]
 
             socks = select.select(sockets, [], [], 0.1)[0]
             for conn in socks:
@@ -81,6 +94,7 @@ class Sender:
                     self.log("Received message '%s'" % msg)
                     self.recv_ack(msg_json["seq_num"])
                 elif conn == sys.stdin:
+                    self.sent_packets = {}
                     count = 0
                     while count < self.cwnd and not self.done_sending:
                         data = sys.stdin.read(DATA_SIZE)
@@ -98,6 +112,7 @@ class Sender:
                         self.send(msg)
                         self.update_seq_num()
                         count += 1
+                        
 
                     
 
