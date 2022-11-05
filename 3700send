@@ -3,6 +3,7 @@ import hashlib
 import argparse, socket, time, json, select, struct, sys, math
 
 DATA_SIZE = 1375
+# initialize RTT to 0.5 seconds
 RTT = 0.5
 
 class Sender:
@@ -12,7 +13,6 @@ class Sender:
         self.log("Sender starting up using port %s" % self.remote_port)
         self.socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         self.socket.bind(('0.0.0.0', 0))
-        self.waiting = False
         self.done_loading = False
         self.cwnd = 1
         self.ssthresh = 2
@@ -21,10 +21,8 @@ class Sender:
         self.sent_packets = {}
         self.retransmit_packets = {}
         self.num_dup_acks = 0
-        self.retransmitting = False
         
-        
-
+    # prints message to stderr
     def log(self, message):
         sys.stderr.write(message + "\n")
         sys.stderr.flush()
@@ -32,17 +30,20 @@ class Sender:
     def send(self, message):
         self.socket.sendto(json.dumps(message).encode('utf-8'), (self.host, self.remote_port))
     
+    # retransmits sent packets
     def fast_retransmit(self):
-        # Resend the packets
+        # resend the packets
         self.reset_sent()
         self.flush_packets()
-        # Fast recovery; avoid unnecessary return to slow start
+        # avoids unnecessary return to slow start
         self.cwnd = self.ssthresh / 2
     
+    # moves unacknowledged sent packets to a list that stores packets that need to be retransmitted and clears sent packets
     def reset_sent(self):
         self.retransmit_packets.update(self.sent_packets)
         self.sent_packets = {}
     
+    # grows the window
     def update_cwnd(self):
         # slow start
         if (self.cwnd < self.ssthresh):
@@ -51,38 +52,42 @@ class Sender:
         else:
             self.cwnd = self.cwnd + 1 / self.cwnd
             
+    # handles timeout when RTO expires and retransmit packets
     def on_timeout(self):
         global RTT
-        self.log("Timing out")
+        # return to slow start 
         self.ssthresh = self.cwnd / 2
         self.cwnd = 1
-        # If we're timing out, then RTT is worsening
+        # update rtt 
         self.update_rtt(time.time() - 2 * RTT)
-
-        # Resend packets
+        # resend packets
         self.reset_sent()
         self.flush_packets()
     
-    def set_not_waiting(self):
-        return len(self.sent_packets) < self.cwnd
-    
+    # updates rtt according to timestamp of previously sent packet
     def update_rtt(self, timestamp):
         global RTT
         new_sample = time.time() - timestamp
         a = 0.875
         RTT = (a * RTT) + ((1 - a) * new_sample)
-        self.log("Updating RTO to %s" %(2 * RTT))
+        # self.log("Updating RTO to %s" %(2 * RTT))
     
+    # increments the sequence by one after sending packets
     def update_seq_num(self):
         self.seq_num = (self.seq_num + 1) % (2**32 - 1)
         
+    # reads data from stdin and save them to a list of loaded data
     def load_packets(self):
+        # if haven't done loading data from stdin
         if not self.done_loading:
-            for vacancy in range(int(math.floor(self.cwnd) - len(self.buffered_packets))):
+            # read as many packets as the open window size
+            for i in range(int(math.floor(self.cwnd) - len(self.buffered_packets))):
                 data = sys.stdin.read(DATA_SIZE)
+                # when there is no more data
                 if len(data) == 0:
                     self.done_loading = True
                     return
+                # generate message
                 msg = { 
                        "type": "msg", 
                        "data": data,
@@ -90,54 +95,62 @@ class Sender:
                        "hash": hashlib.md5(data.encode('utf-8')).hexdigest(),
                        "timestamp": "",
                        }
+                # store the loaded packet
                 self.buffered_packets[self.seq_num] = msg
                 self.update_seq_num()
            
+    # send loaded packets to the receiver
     def flush_packets(self):
-        for i, seq in enumerate(sorted(self.retransmit_packets)):
+        # send the packets that need to be retransmitted first
+        self.send_packet(self.retransmit_packets)
+        # then send packets loaded from stdin
+        self.send_packet(self.buffered_packets)
+    
+    # sends as many packets as the size of open window
+    def send_packet(self, source):
+        for i, seq in enumerate(sorted(source)):
             if len(self.sent_packets) < self.cwnd and i < self.cwnd:
-                msg = self.retransmit_packets.pop(seq)
+                msg = source.pop(seq)
+                # append packet to list of sent packets
                 self.sent_packets[msg["seq_num"]] = msg
                 msg["timestamp"] = time.time()
+                # send packet to receiver
                 self.send(msg)
-                self.log("Sending message '%s'" % msg["data"][0:20] + " seq: " + str(msg["seq_num"]))
-        for i, seq in enumerate(sorted(self.buffered_packets)):
-            if len(self.sent_packets) < self.cwnd and i < self.cwnd:
-                msg = self.buffered_packets.pop(seq)
-                self.sent_packets[msg["seq_num"]] = msg
-                msg["timestamp"] = time.time()
-                self.send(msg)
-                self.log("Sending message '%s'" % msg["data"][0:20] + " seq: " + str(msg["seq_num"]))
+                # self.log("Sending message '%s'" % msg["data"][0:20] + " seq: " + str(msg["seq_num"]))
 
+    # receives ACK from the receiver
     def recv_ack(self, ack):
         seq_num = ack["seq_num"]
-        # If an ACK was received for an in-flight packet
+        # if we are waiting for this ACK
         if (seq_num in self.sent_packets.keys()):
-            self.log("Received ack: %s" %seq_num)
-            # Reset DUP_ACKs since we got a valid ACK
+            # self.log("Received ack: %s" %seq_num)
+            # Reset number of dupliate ACKs
             self.num_dup_acks = 0
-            # Remove the ACK'd packet from SENT
+            # remove acknowledged packet from sent packets
             msg = self.sent_packets.pop(seq_num)
-            # Update the RTT
+            # update rtt
             self.update_rtt(msg["timestamp"])
-            # Grow the congestion window
+            # grow the congestion window
             self.update_cwnd()
-        # We got an ACK for something that has already been ACKed
+        # when ACK is a duplicate
         else:
+            # increment number of duplicate packets
             self.num_dup_acks += 1
+            # retransmit if 3 duplicate ACKs are received
             if self.num_dup_acks == 3:
                 self.num_dup_acks = 0
                 self.fast_retransmit()
-            return False
                         
     def run(self):
         global RTT
         while True:
+            # exit if no more data from stdin and all sent packets have been acknowledged
             if self.done_loading:
                 if len(self.sent_packets) == 0 and len(self.retransmit_packets) == 0:
-                    self.log("All done!")
+                    # self.log("All done!")
                     sys.exit(0)
             
+            # load packets from stdin and send to receiver
             self.load_packets()
             self.flush_packets()
             
@@ -147,13 +160,15 @@ class Sender:
                 k, addr = self.socket.recvfrom(65535)
                 msg = k.decode('utf-8')
 
-                self.log("Received message '%s'" % msg)
+                # self.log("Received message '%s'" % msg)
                 try:
                     msg_json = json.loads(msg)
                     self.recv_ack(msg_json)
                 except:
+                    # received corrupted packet
                     self.log("Could not load json")
             else:
+                # retransmit and update rtt on timeout, and return to slow start
                 self.on_timeout()
         return
 

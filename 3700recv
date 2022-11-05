@@ -15,63 +15,68 @@ class Receiver:
         self.out_of_order_packets = {}
         self.prev_print_ack = -1
 
+    # send a message to the sender
     def send(self, message):
         self.socket.sendto(json.dumps(message).encode('utf-8'), (self.remote_host, self.remote_port))
 
+    # prints a message to stderr
     def log(self, message):
         sys.stderr.write(message + "\n")
         sys.stderr.flush()
         
-    # Print out the data to stdout
+    # print message to stdout
     def print(self, msg):
         print(msg["data"], end='', flush=True)
-        self.log("Printing %s" %msg["data"][0:20])
+        # self.log("Printing %s" %msg["data"][0:20])
         self.prev_print_ack = msg["seq_num"]
 
+    # sends an acknowledgement message to sender
     def ack(self, msg):
         seq_num = msg["seq_num"]
         self.send({ 
                    "type": "ack",
                    "seq_num": seq_num,
                    })
-        self.log("Acknowledging packet %s" %seq_num)
+        # self.log("Acknowledging packet %s" %seq_num)
     
+    # received a packet from sender
     def recv(self, msg):
+        # if packet is not corrupted. a corrupted packet is treated as if it was lost
         if self.validate_hash(msg):
             msg_seq = msg["seq_num"] 
             # if it is not a duplicate packet
             if not self.isDuplicate(msg_seq):
                 # if it is in order
-                self.log("Msg seq: %s" %msg_seq)
-                self.log('Expecting: %s' %(self.prev_print_ack + 1))
+                # self.log("Msg seq: %s" %msg_seq)
+                # self.log('Expecting: %s' %(self.prev_print_ack + 1))
                 if msg_seq == self.prev_print_ack + 1:
                     self.print(msg)
+                    # check if any previousely received out of order packets can be printed after receiving this packet
                     self.check_out_of_order_packets()
-                    self.ack(msg)
-                    return
                 # if it is out of order
                 else:
                     self.out_of_order_packets[msg_seq] = msg
+            # acknowledge this packet
             self.ack(msg)
     
+    # check if any previousely received out of order packets can be printed after receiving a new in order packet recursively
     def check_out_of_order_packets(self):
         seq_num = self.prev_print_ack + 1
-        self.log("Checking %s" %seq_num)
+        # self.log("Checking %s" %seq_num)
+        # if we have already received the next in order packet
         if seq_num in self.out_of_order_packets.keys():
             msg = self.out_of_order_packets[seq_num]
-            self.log("Now able to ack %s" %seq_num)
+            # self.log("Now able to ack %s" %seq_num)
             self.print(msg)
             self.check_out_of_order_packets()
 
+    # checks if a packet is duplicate of prevoisly acknowledged ones
     def isDuplicate(self, seq_num):
-        result = seq_num <= self.prev_print_ack
-        if result:
-            self.log("Duplicate %s" %seq_num + " with last acked " + str(self.prev_print_ack))
-        return result
+        return seq_num <= self.prev_print_ack
     
+    # checks if a packet is corrupted by comparing the hash of data and provided hash
     def validate_hash(self, msg):
-        result = hashlib.md5(msg["data"].encode('utf-8')).hexdigest() == msg["hash"]
-        return result
+        return hashlib.md5(msg["data"].encode('utf-8')).hexdigest() == msg["hash"]
     
     def run(self):
         while True:
@@ -86,9 +91,11 @@ class Receiver:
 
                 try:
                     msg = json.loads(data.decode('utf-8'))
-                    self.log("Received data message %s" % msg["data"][0:20])
+                    # self.log("Received data message %s" % msg["data"][0:20])
+                    # process received message
                     self.recv(msg)
                 except:
+                    # packet is corrupted
                     self.log("Could not load json")
         return
 
