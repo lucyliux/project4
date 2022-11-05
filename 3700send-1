@@ -18,7 +18,7 @@ class Sender:
         self.received_ACKs = []
         # list of sequence numbers
         self.waiting_ACK_queue =[]
-        self.done_sending = False
+        self.done_loading = False
 
     def log(self, message):
         sys.stderr.write(message + "\n")
@@ -58,10 +58,10 @@ class Sender:
          
     def run(self):
         while True:
-            if self.done_sending and len(self.waiting_ACK_queue) == 0:
+            if self.done_loading and len(self.waiting_ACK_queue) == 0:
                 self.log("All done!")
                 sys.exit(0)
-            sockets = [self.socket, sys.stdin] if not self.done_sending and (len(self.waiting_ACK_queue) < self.adv_window) else [self.socket]
+            sockets = [self.socket, sys.stdin] if not self.done_loading and (len(self.waiting_ACK_queue) < self.adv_window) else [self.socket]
 
             socks = select.select(sockets, [], [], 0.1)[0]
             for conn in socks:
@@ -89,7 +89,7 @@ class Sender:
                     while count < self.adv_window - len(self.waiting_ACK_queue):
                         data = sys.stdin.read(DATA_SIZE)
                         if len(data) == 0:
-                            self.done_sending = True
+                            self.done_loading = True
                             break
                             # self.log("All done!")
                             # sys.exit(0)
